@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>Asistente Dental — Demo</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root{
+    --brand:#2563eb;
+    --bg:#f5f7fb;
+    --card:#fff;
+    --muted:#94a3b8;
+  }
+  html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,Arial,sans-serif;background:var(--bg)}
+  .wrap{min-height:100%;display:flex;align-items:center;justify-content:center;padding:20px}
+  .chat-container{
+    width:420px; max-width:calc(100% - 40px);
+    height:640px; max-height:90vh;
+    background:var(--card); border-radius:14px; box-shadow:0 12px 40px rgba(2,6,23,0.08);
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  .header{padding:16px 18px;background:linear-gradient(90deg,var(--brand),#1d4ed8);color:#fff;font-weight:600}
+  .chat{flex:1;padding:14px; overflow:auto; display:flex; flex-direction:column; gap:8px}
+  .message{max-width:78%;padding:10px 14px;border-radius:12px;font-size:14px;line-height:1.3;word-break:break-word}
+  .user{align-self:flex-end;background:var(--brand);color:#fff;border-bottom-right-radius:4px}
+  .bot{align-self:flex-start;background:#f1f5f9;color:#0f172a;border-bottom-left-radius:4px}
+  .meta{font-size:12px;color:var(--muted);margin-top:4px}
+  .input-area{display:flex;padding:12px;border-top:1px solid #eee;gap:8px}
+  input[type="text"]{flex:1;padding:10px 12px;border-radius:999px;border:1px solid #e6e9ee;outline:none;font-size:14px}
+  button.send{padding:10px 14px;border-radius:999px;background:var(--brand);color:#fff;border:0;cursor:pointer;min-width:84px}
+  button.send[disabled]{opacity:.6;cursor:not-allowed}
+  .typing{font-size:13px;color:var(--muted);font-style:italic;padding:6px 10px;border-radius:10px;background:#fff;display:inline-block}
+  .small{font-size:12px;color:var(--muted);padding:6px 0;text-align:center}
+  .footer-note{padding:8px 14px;font-size:12px;color:var(--muted);text-align:center}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="chat-container" role="application" aria-label="Chat Asistente Dental">
+      <div class="header">Asistente Dental — Demo</div>
+      <div id="chat" class="chat" aria-live="polite"></div>
+
+      <div class="input-area">
+        <input id="messageInput" type="text" placeholder="Escribe tu mensaje..." aria-label="Mensaje" />
+        <button id="sendBtn" class="send">Enviar</button>
+      </div>
+
+      <div class="footer-note">Sesión: <span id="sid"></span></div>
+    </div>
+  </div>
+
+<script>
+/*
+  INSTRUCCIONES:
+  - Cambia WEBHOOK_URL por tu webhook de n8n en producción.
+  - Asegúrate el nodo 'Respond to Webhook' responde con un JSON que contenga
+    preferiblemente el campo `response`, pero el cliente intentará varios fallback keys:
+    response | message | text | reply
+*/
+
+const WEBHOOK_URL = "https://n8n.iaagency.online/webhook/demo-chat"; // 🔥 reemplaza aquí
+const TIMEOUT_MS = 15000; // timeout fetch
+
+// Persistimos sessionId para seguir la misma sesión tras reload
+const SESSION_KEY = "demo_chat_session";
+let sessionId = localStorage.getItem(SESSION_KEY);
+if (!sessionId) {
+  sessionId = "user_" + Math.random().toString(36).substring(2, 12);
+  localStorage.setItem(SESSION_KEY, sessionId);
+}
+document.getElementById("sid").innerText = sessionId;
+
+const chatEl = document.getElementById("chat");
+const inputEl = document.getElementById("messageInput");
+const sendBtn = document.getElementById("sendBtn");
+
+function safeText(s){
+  // Garantiza que sea string y evita inyección (usamos innerText al renderizar)
+  if (s === null || s === undefined) return "";
+  return String(s);
+}
+
+function addMessage(text, cls){
+  const container = document.createElement("div");
+  container.className = "message " + cls;
+  container.innerText = safeText(text);
+  chatEl.appendChild(container);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function setTyping(on){
+  const existing = document.getElementById("typing-indicator");
+  if (on) {
+    if (existing) return;
+    const t = document.createElement("div");
+    t.id = "typing-indicator";
+    t.className = "typing bot";
+    t.innerText = "Sofía está escribiendo...";
+    chatEl.appendChild(t);
+    chatEl.scrollTop = chatEl.scrollHeight;
+  } else {
+    if (existing) existing.remove();
+  }
+}
+
+// Extrae el texto de la respuesta con varios fallback posibles
+function extractReplyFromPayload(payload){
+  // payload puede ser objeto, texto, array, etc.
+  if (!payload) return null;
+
+  // si la respuesta viene como texto plano (no JSON), return it
+  if (typeof payload === "string") {
+    try {
+      const parsed = JSON.parse(payload);
+      payload = parsed;
+    } catch(e){
+      return payload;
+    }
+  }
+
+  if (Array.isArray(payload) && payload.length > 0) {
+    // si es array intentamos el primer elemento
+    payload = payload[0];
+  }
+
+  // Prioridad de keys
+  const keys = ["response","message","text","reply","data"];
+  for (const k of keys) {
+    if (payload[k] !== undefined && payload[k] !== null) {
+      // si payload[k] es objeto con mensaje dentro:
+      if (typeof payload[k] === "object") {
+        if (payload[k].text) return payload[k].text;
+        if (payload[k].message) return payload[k].message;
+      }
+      return payload[k];
+    }
+  }
+
+  // si no hay keys, intenta buscar una cadena en el objeto
+  for (const v of Object.values(payload)) {
+    if (typeof v === "string" && v.trim().length > 0) return v;
+  }
+
+  return null;
+}
+
+// Fetch con timeout y robustez
+async function postMessageToWebhook(messageText){
+  const controller = new AbortController();
+  const timeout = setTimeout(()=> controller.abort(), TIMEOUT_MS);
+
+  // Body: solo lo necesario. NO poner headers personalizados con valores undefined.
+  const body = {
+    message: messageText,
+    sessionId: sessionId,
+    timestamp: Date.now()
+  };
+
+  try {
+    const res = await fetch(WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+      credentials: "omit"
+    });
+
+    clearTimeout(timeout);
+
+    // Si la respuesta no es JSON, intentamos leer texto
+    const ct = res.headers.get("content-type") || "";
+    if (ct.includes("application/json")) {
+      const json = await res.json();
+      return { ok: res.ok, payload: json, status: res.status };
+    } else {
+      const txt = await res.text();
+      // Intentamos parsear por si acaso
+      try {
+        const parsed = JSON.parse(txt);
+        return { ok: res.ok, payload: parsed, status: res.status };
+      } catch (e) {
+        return { ok: res.ok, payload: txt, status: res.status };
+      }
+    }
+  } catch (err) {
+    clearTimeout(timeout);
+    // Normaliza el error
+    if (err.name === "AbortError") throw new Error("timeout");
+    throw err;
+  }
+}
+
+async function sendMessage(){
+  const text = inputEl.value.trim();
+  if (!text) return;
+
+  // UI
+  addMessage(text, "user");
+  inputEl.value = "";
+  sendBtn.disabled = true;
+  setTyping(true);
+
+  try {
+    const { ok, payload, status } = await postMessageToWebhook(text);
+
+    // extraer texto con fallback
+    const reply = extractReplyFromPayload(payload);
+
+    setTyping(false);
+    sendBtn.disabled = false;
+
+    if (!ok) {
+      // mostrar error con info del status si existe
+      addMessage("Error: el servidor respondió con estado " + status, "bot");
+      console.error("Webhook response not ok:", status, payload);
+      return;
+    }
+
+    if (reply === null || reply === "") {
+      // nada legible en payload -> mostrar fallback y log para debug
+      console.warn("Respuesta vacía del webhook:", payload);
+      addMessage("Lo siento, no entendí la respuesta del servidor.", "bot");
+      return;
+    }
+
+    addMessage(reply, "bot");
+
+  } catch (err) {
+    setTyping(false);
+    sendBtn.disabled = false;
+
+    console.error("Error enviando mensaje:", err);
+    if (err.message === "timeout") {
+      addMessage("Error de conexión: el servidor no respondió (timeout).", "bot");
+    } else {
+      addMessage("Error de conexión con el servidor.", "bot");
+    }
+  }
+}
+
+// soporte tecla Enter
+inputEl.addEventListener("keydown", (e)=>{
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+sendBtn.addEventListener("click", sendMessage);
+
+// Mensaje de bienvenida inicial (opcional)
+(function welcome(){
+  // Añadir bienvenida localmente en el frontend mientras el backend no la envíe
+  const previouslyStarted = sessionStorage.getItem("demo_chat_started_v1");
+  if (!previouslyStarted) {
+    addMessage("¡Hola! Soy Sofía, tu asistente de Dental Office. ¿En qué puedo ayudarte hoy?", "bot");
+    sessionStorage.setItem("demo_chat_started_v1", "1");
+  }
+})();
+
+</script>
+</body>
+</html>
