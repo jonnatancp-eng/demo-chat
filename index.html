@@ -50,24 +50,22 @@
   </div>
 
 <script>
-/*
-  INSTRUCCIONES:
-  - Cambia WEBHOOK_URL por tu webhook de n8n en producción.
-  - Asegúrate el nodo 'Respond to Webhook' responde con un JSON que contenga
-    preferiblemente el campo `response`, pero el cliente intentará varios fallback keys:
-    response | message | text | reply
-*/
 
-const WEBHOOK_URL = "https://n8n.iaagency.online/webhook/chat"; // 🔥 reemplaza aquí
-const TIMEOUT_MS = 60000; // timeout fetch
+const WEBHOOK_URL = "https://n8n.iaagency.online/webhook/chat";
 
-// Persistimos sessionId para seguir la misma sesión tras reload
+/* 🔥 NUEVO: tenantId del cliente */
+const tenant_id = "clinica_b";
+
+const TIMEOUT_MS = 60000;
+
 const SESSION_KEY = "demo_chat_session";
 let sessionId = localStorage.getItem(SESSION_KEY);
+
 if (!sessionId) {
   sessionId = "user_" + Math.random().toString(36).substring(2, 12);
   localStorage.setItem(SESSION_KEY, sessionId);
 }
+
 document.getElementById("sid").innerText = sessionId;
 
 const chatEl = document.getElementById("chat");
@@ -75,7 +73,6 @@ const inputEl = document.getElementById("messageInput");
 const sendBtn = document.getElementById("sendBtn");
 
 function safeText(s){
-  // Garantiza que sea string y evita inyección (usamos innerText al renderizar)
   if (s === null || s === undefined) return "";
   return String(s);
 }
@@ -103,12 +100,9 @@ function setTyping(on){
   }
 }
 
-// Extrae el texto de la respuesta con varios fallback posibles
 function extractReplyFromPayload(payload){
-  // payload puede ser objeto, texto, array, etc.
   if (!payload) return null;
 
-  // si la respuesta viene como texto plano (no JSON), return it
   if (typeof payload === "string") {
     try {
       const parsed = JSON.parse(payload);
@@ -119,15 +113,12 @@ function extractReplyFromPayload(payload){
   }
 
   if (Array.isArray(payload) && payload.length > 0) {
-    // si es array intentamos el primer elemento
     payload = payload[0];
   }
 
-  // Prioridad de keys
   const keys = ["response","message","text","reply","data"];
   for (const k of keys) {
     if (payload[k] !== undefined && payload[k] !== null) {
-      // si payload[k] es objeto con mensaje dentro:
       if (typeof payload[k] === "object") {
         if (payload[k].text) return payload[k].text;
         if (payload[k].message) return payload[k].message;
@@ -136,7 +127,6 @@ function extractReplyFromPayload(payload){
     }
   }
 
-  // si no hay keys, intenta buscar una cadena en el objeto
   for (const v of Object.values(payload)) {
     if (typeof v === "string" && v.trim().length > 0) return v;
   }
@@ -144,15 +134,14 @@ function extractReplyFromPayload(payload){
   return null;
 }
 
-// Fetch con timeout y robustez
 async function postMessageToWebhook(messageText){
   const controller = new AbortController();
   const timeout = setTimeout(()=> controller.abort(), TIMEOUT_MS);
 
-  // Body: solo lo necesario. NO poner headers personalizados con valores undefined.
   const body = {
     message: messageText,
     sessionId: sessionId,
+    tenant_id: tenant_id,   
     timestamp: Date.now()
   };
 
@@ -169,14 +158,12 @@ async function postMessageToWebhook(messageText){
 
     clearTimeout(timeout);
 
-    // Si la respuesta no es JSON, intentamos leer texto
     const ct = res.headers.get("content-type") || "";
     if (ct.includes("application/json")) {
       const json = await res.json();
       return { ok: res.ok, payload: json, status: res.status };
     } else {
       const txt = await res.text();
-      // Intentamos parsear por si acaso
       try {
         const parsed = JSON.parse(txt);
         return { ok: res.ok, payload: parsed, status: res.status };
@@ -186,7 +173,6 @@ async function postMessageToWebhook(messageText){
     }
   } catch (err) {
     clearTimeout(timeout);
-    // Normaliza el error
     if (err.name === "AbortError") throw new Error("timeout");
     throw err;
   }
@@ -196,7 +182,6 @@ async function sendMessage(){
   const text = inputEl.value.trim();
   if (!text) return;
 
-  // UI
   addMessage(text, "user");
   inputEl.value = "";
   sendBtn.disabled = true;
@@ -204,22 +189,18 @@ async function sendMessage(){
 
   try {
     const { ok, payload, status } = await postMessageToWebhook(text);
-
-    // extraer texto con fallback
     const reply = extractReplyFromPayload(payload);
 
     setTyping(false);
     sendBtn.disabled = false;
 
     if (!ok) {
-      // mostrar error con info del status si existe
       addMessage("Error: el servidor respondió con estado " + status, "bot");
       console.error("Webhook response not ok:", status, payload);
       return;
     }
 
     if (reply === null || reply === "") {
-      // nada legible en payload -> mostrar fallback y log para debug
       console.warn("Respuesta vacía del webhook:", payload);
       addMessage("Lo siento, no entendí la respuesta del servidor.", "bot");
       return;
@@ -240,18 +221,16 @@ async function sendMessage(){
   }
 }
 
-// soporte tecla Enter
 inputEl.addEventListener("keydown", (e)=>{
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     sendMessage();
   }
 });
+
 sendBtn.addEventListener("click", sendMessage);
 
-// Mensaje de bienvenida inicial (opcional)
 (function welcome(){
-  // Añadir bienvenida localmente en el frontend mientras el backend no la envíe
   const previouslyStarted = sessionStorage.getItem("demo_chat_started_v1");
   if (!previouslyStarted) {
     addMessage("¡Hola! Soy Sofía, tu asistente de Dental Office. ¿En qué puedo ayudarte hoy?", "bot");
